@@ -61,7 +61,7 @@ class Model_Trans_all(nn.Module):
                 # Getting point cloud and gt pose Features
                 gt_pose = batch['gt_pose'][:, 9:]
                 labels = batch['id']
-                trans_loss = self.clrk(pts_features, labels, gt_T)
+                trans_loss = self.clrk(pts_features, labels, gt_pose)
                 
                 return trans_loss
             
@@ -73,8 +73,8 @@ class Model_Trans_all(nn.Module):
                 # Getting point cloud and gt pose Features
                 gt_pose = batch['gt_pose'][:, 9:]
                 labels = batch['id']
-                trans_loss = self.clrk(pts_features, labels, gt_T)
-                return trans_loss, pts_features, gt_T
+                trans_loss = self.clrk(pts_features, labels, gt_pose)
+                return trans_loss, pts_features, gt_pose
         else:
             import pdb;pdb.set_trace()
             return None                

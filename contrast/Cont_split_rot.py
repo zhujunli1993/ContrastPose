@@ -84,7 +84,7 @@ class Model_Rot_all(nn.Module):
     ):
         super(Model_Rot_all, self).__init__()
         ''' encode point clouds '''
-        self.pts_encoder = Pts_3DGC_HS()
+        self.pts_encoder = Pts_3DGC()
 
         self.project_head = Projection(512)
         self.temperature = temperature

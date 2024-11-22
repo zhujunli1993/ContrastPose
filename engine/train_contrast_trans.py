@@ -218,7 +218,6 @@ if __name__ == '__main__':
     
     wandb.init(config=cfg_clip,
                project=cfg_clip.wandb_proj, 
-               entity="zhujunli",
                job_type="training",
                name=cfg_clip.wandb_name,
                reinit=True)
