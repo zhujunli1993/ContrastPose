@@ -22,7 +22,7 @@ pip install -r requirements.txt
   <summary>[Click to expand]</summary>
 
 - **HRC-Pose**
-  - **HRC-Pose/backbone**: Some backbone networks used in the first training phase.
+  - **HRC-Pose/backbone**: Some backbone networks used in training.
   - **HRC-Pose/config**
     - **HRC-Pose/config/common.py**: Some network and datasets settings for experiments.  
   - **HRC-Pose/contrast**
@@ -33,8 +33,7 @@ pip install -r requirements.txt
     - **HRC-Pose/contrast/utils.py**: Some utilities functions.
   - **HRC-Pose/datasets**
     - **HRC-Pose/datasets/data_augmentation.py**: Data augmentation functions.
-    - **HRC-Pose/datasets/load_data_contrastive.py**: Data loading functions for the first training phase.
-    - **HRC-Pose/datasets/load_data.py**： Data loading functions for the second training phase.
+    - **HRC-Pose/datasets/load_data.py**： Data loading functions.
   - **HRC-Pose/engine**
     - **HRC-Pose/engine/organize_loss.py**: Loss terms for training phase.
     - **HRC-Pose/engine/train_estimator.py**: The training phase.
@@ -64,11 +63,6 @@ pip install -r requirements.txt
 The datasets we used for training and testing are provided from the NOCS: Normalized Object Coordinate Space for Category-Level 6D Object Pose and Size Estimation. 
 
 
-## The First Training Phase.
-Please note, some details are changed from the original paper for more efficient training. 
-
-
-Detailed configurations are in `config/config.py` and `script.sh`
 
 ## The Training Process.
 
