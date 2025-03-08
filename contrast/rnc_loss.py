@@ -7,7 +7,7 @@ import torch.nn.functional as F
 import pytorch3d
 import sys
 sys.path.append('..')
-from configs.config import get_config 
+from config.config_contrast import get_config 
 CFG = get_config()
 
 
@@ -208,17 +208,24 @@ class RnCLoss_rot_sym(nn.Module):
             return loss_rot
         else:
             return None  
-class RnCLoss_trans(nn.Module):
+class RnCLoss_trans_nonSym_mix(nn.Module):
     def __init__(self, temperature=2, soft_lambda=0.500, label_diff='l1', feature_sim='l2'):
-        super(RnCLoss_trans, self).__init__()
+        super(RnCLoss_trans_nonSym_mix, self).__init__()
         self.t = temperature
+        
+        self.label_diff_fn_rot = LabelDifference_rot('cos')
         self.label_diff_fn = LabelDifference_trans(label_diff)
         self.feature_sim_fn = FeatureSimilarity(feature_sim)
         self.soft_lambda = soft_lambda
 
-    def forward(self, trans_feat, trans, complete=False):
+    def forward(self, trans_feat, rot_green, rot_red, trans, complete=False):
         
         trans_diff = self.label_diff_fn(trans)
+        
+        rot_green_diff = self.label_diff_fn_rot(rot_green)
+        rot_red_diff = self.label_diff_fn_rot(rot_red)
+        
+        rot_diff = rot_green_diff + rot_red_diff
         
         trans_logits = self.feature_sim_fn(trans_feat).div(self.t)
         trans_logits_max, _ = torch.max(trans_logits, dim=1, keepdim=True)
@@ -232,47 +239,207 @@ class RnCLoss_trans(nn.Module):
         trans_exp_logits = trans_exp_logits.masked_select((1 - torch.eye(n).to(trans_logits.device)).bool()).view(n, n - 1)
        
         trans_diff = trans_diff.masked_select((1 - torch.eye(n).to(trans_logits.device)).bool()).view(n, n - 1)
+        rot_diff = rot_diff.masked_select((1 - torch.eye(n).to(trans_logits.device)).bool()).view(n, n - 1)
         
         loss = 0.0
+        
+        rot_diff_expanded = rot_diff.unsqueeze(2).expand(-1, -1, n-1)
+        rot_diff_expanded_columns = rot_diff_expanded.transpose(1, 2)
         
         trans_diff_expanded = trans_diff.unsqueeze(2).expand(-1, -1, n-1)
         trans_diff_expanded_columns = trans_diff_expanded.transpose(1, 2)
         
-        
+        rot_result_matrices = (rot_diff_expanded <= rot_diff_expanded_columns)
         trans_result_matrices = (trans_diff_expanded <= trans_diff_expanded_columns)
         
+        hard_neg_mask = (rot_result_matrices * trans_result_matrices).float() # rot_diff<=anchor_rot_diff AND trans_diff<=anchor_trans_diff
+        
         trans_neg_mask_label =  trans_result_matrices.permute(1,0,2)
-
+        hard_neg_mask = hard_neg_mask.permute(1,0,2)
+        
+        # hard_neg_mask = (rot_result_matrices * trans_result_matrices).float() # rot_diff<=anchor_rot_diff AND trans_diff<=anchor_trans_diff
+        # soft_neg_mask = (rot_result_matrices + trans_result_matrices).float() # rot_diff<=anchor_rot_diff OR trans_diff<=anchor_trans_diff
+        
+        
+        # hard_neg_mask = hard_neg_mask.permute(1,0,2)
+        # soft_neg_mask = soft_neg_mask.permute(1,0,2)
         
         eps = 1e-7
             
         pos_log_probs_trans = trans_logits.permute(1,0) - torch.log((trans_neg_mask_label * trans_exp_logits).sum(dim=-1)+eps)
+        pos_log_probs_hard = trans_logits.permute(1,0) - torch.log((hard_neg_mask * trans_exp_logits).sum(dim=-1)+eps)
         
+        loss_hard = - (pos_log_probs_hard / (n * (n - 1))).sum()
         loss_trans = - (pos_log_probs_trans / (n * (n - 1))).sum()
         
+        loss = loss_hard + self.soft_lambda * loss_trans
+        
+        if not torch.isnan(loss) and not torch.isinf(loss): 
+            return loss
+        else:
+            return None 
 
-        if not torch.isnan(loss_trans) and not torch.isinf(loss_trans): 
-            return loss_trans
+class RnCLoss_trans_mug_mix(nn.Module):
+    def __init__(self, temperature=2, soft_lambda=0.500, label_diff='l1', feature_sim='l2'):
+        super(RnCLoss_trans_mug_mix, self).__init__()
+        self.t = temperature
+        self.label_diff_fn_rot = LabelDifference_rot('cos')
+        self.label_diff_fn = LabelDifference_trans(label_diff)
+        
+        self.feature_sim_fn = FeatureSimilarity(feature_sim)
+        self.soft_lambda = soft_lambda
+
+    def forward(self, trans_feat, rot_green, rot_red, trans, sym, complete=False):
+        trans_diff = self.label_diff_fn(trans)
+        
+        rot_green_diff = self.label_diff_fn_rot(rot_green)
+        rot_red_diff = self.label_diff_fn_rot(rot_red)
+        
+        rot_diff = rot_green_diff + rot_red_diff
+        sym_ind = (sym[:, 0] == 1).nonzero(as_tuple=True)[0] # all sym mug 
+        rot_diff[sym_ind,:] = rot_green_diff[sym_ind,:] # for sym mug, only keep the green_vec difference between sym mug and other non-sym mug
+        rot_diff[:,sym_ind] = rot_green_diff[:,sym_ind] # for sym mug, only keep the green_vec difference between sym mug and other non-sym mug
+        
+        trans_logits = self.feature_sim_fn(trans_feat).div(self.t)
+        trans_logits_max, _ = torch.max(trans_logits, dim=1, keepdim=True)
+        trans_logits -= trans_logits_max
+        trans_exp_logits = trans_logits.exp()
+
+        n = trans_logits.shape[0]  # n = 2bs
+
+        # remove diagonal
+        trans_logits = trans_logits.masked_select((1 - torch.eye(n).to(trans_logits.device)).bool()).view(n, n - 1)
+        trans_exp_logits = trans_exp_logits.masked_select((1 - torch.eye(n).to(trans_logits.device)).bool()).view(n, n - 1)
+       
+        trans_diff = trans_diff.masked_select((1 - torch.eye(n).to(trans_logits.device)).bool()).view(n, n - 1)
+        rot_diff = rot_diff.masked_select((1 - torch.eye(n).to(trans_logits.device)).bool()).view(n, n - 1)
+        
+        loss = 0.0
+        
+        rot_diff_expanded = rot_diff.unsqueeze(2).expand(-1, -1, n-1)
+        rot_diff_expanded_columns = rot_diff_expanded.transpose(1, 2)
+        
+        trans_diff_expanded = trans_diff.unsqueeze(2).expand(-1, -1, n-1)
+        trans_diff_expanded_columns = trans_diff_expanded.transpose(1, 2)
+        
+        rot_result_matrices = (rot_diff_expanded <= rot_diff_expanded_columns)
+        trans_result_matrices = (trans_diff_expanded <= trans_diff_expanded_columns)
+        
+        hard_neg_mask = (rot_result_matrices * trans_result_matrices).float() # rot_diff<=anchor_rot_diff AND trans_diff<=anchor_trans_diff
+        
+        trans_neg_mask_label =  trans_result_matrices.permute(1,0,2)
+        hard_neg_mask = hard_neg_mask.permute(1,0,2)
+        
+        # hard_neg_mask = (rot_result_matrices * trans_result_matrices).float() # rot_diff<=anchor_rot_diff AND trans_diff<=anchor_trans_diff
+        # soft_neg_mask = (rot_result_matrices + trans_result_matrices).float() # rot_diff<=anchor_rot_diff OR trans_diff<=anchor_trans_diff
+        
+        
+        # hard_neg_mask = hard_neg_mask.permute(1,0,2)
+        # soft_neg_mask = soft_neg_mask.permute(1,0,2)
+        
+        eps = 1e-7
+            
+        pos_log_probs_trans = trans_logits.permute(1,0) - torch.log((trans_neg_mask_label * trans_exp_logits).sum(dim=-1)+eps)
+        pos_log_probs_hard = trans_logits.permute(1,0) - torch.log((hard_neg_mask * trans_exp_logits).sum(dim=-1)+eps)
+        
+        loss_hard = - (pos_log_probs_hard / (n * (n - 1))).sum()
+        loss_trans = - (pos_log_probs_trans / (n * (n - 1))).sum()
+        
+        loss = loss_hard + self.soft_lambda * loss_trans
+        
+        if not torch.isnan(loss) and not torch.isinf(loss): 
+            return loss
+        else:
+            return None 
+        
+class RnCLoss_trans_mix(nn.Module):
+    def __init__(self, temperature=2, soft_lambda=0.500, label_diff='l1', feature_sim='l2'):
+        super(RnCLoss_trans_mix, self).__init__()
+        self.t = temperature
+        
+        self.label_diff_fn_rot = LabelDifference_rot('cos')
+        self.label_diff_fn = LabelDifference_trans(label_diff)
+        self.feature_sim_fn = FeatureSimilarity(feature_sim)
+        self.soft_lambda = soft_lambda
+
+    def forward(self, trans_feat, rot, trans, complete=False):
+        
+        trans_diff = self.label_diff_fn(trans)
+        
+        rot_diff = self.label_diff_fn_rot(rot)
+        
+        trans_logits = self.feature_sim_fn(trans_feat).div(self.t)
+        trans_logits_max, _ = torch.max(trans_logits, dim=1, keepdim=True)
+        trans_logits -= trans_logits_max
+        trans_exp_logits = trans_logits.exp()
+
+        n = trans_logits.shape[0]  # n = 2bs
+
+        # remove diagonal
+        trans_logits = trans_logits.masked_select((1 - torch.eye(n).to(trans_logits.device)).bool()).view(n, n - 1)
+        trans_exp_logits = trans_exp_logits.masked_select((1 - torch.eye(n).to(trans_logits.device)).bool()).view(n, n - 1)
+       
+        trans_diff = trans_diff.masked_select((1 - torch.eye(n).to(trans_logits.device)).bool()).view(n, n - 1)
+        rot_diff = rot_diff.masked_select((1 - torch.eye(n).to(trans_logits.device)).bool()).view(n, n - 1)
+        
+        loss = 0.0
+        
+        rot_diff_expanded = rot_diff.unsqueeze(2).expand(-1, -1, n-1)
+        rot_diff_expanded_columns = rot_diff_expanded.transpose(1, 2)
+        
+        trans_diff_expanded = trans_diff.unsqueeze(2).expand(-1, -1, n-1)
+        trans_diff_expanded_columns = trans_diff_expanded.transpose(1, 2)
+        
+        rot_result_matrices = (rot_diff_expanded <= rot_diff_expanded_columns)
+        trans_result_matrices = (trans_diff_expanded <= trans_diff_expanded_columns)
+        
+        hard_neg_mask = (rot_result_matrices * trans_result_matrices).float() # rot_diff<=anchor_rot_diff AND trans_diff<=anchor_trans_diff
+        
+        trans_neg_mask_label =  trans_result_matrices.permute(1,0,2)
+        hard_neg_mask = hard_neg_mask.permute(1,0,2)
+        
+        # hard_neg_mask = (rot_result_matrices * trans_result_matrices).float() # rot_diff<=anchor_rot_diff AND trans_diff<=anchor_trans_diff
+        # soft_neg_mask = (rot_result_matrices + trans_result_matrices).float() # rot_diff<=anchor_rot_diff OR trans_diff<=anchor_trans_diff
+        
+        
+        # hard_neg_mask = hard_neg_mask.permute(1,0,2)
+        # soft_neg_mask = soft_neg_mask.permute(1,0,2)
+        
+        eps = 1e-7
+            
+        pos_log_probs_trans = trans_logits.permute(1,0) - torch.log((trans_neg_mask_label * trans_exp_logits).sum(dim=-1)+eps)
+        pos_log_probs_hard = trans_logits.permute(1,0) - torch.log((hard_neg_mask * trans_exp_logits).sum(dim=-1)+eps)
+        
+        loss_hard = - (pos_log_probs_hard / (n * (n - 1))).sum()
+        loss_trans = - (pos_log_probs_trans / (n * (n - 1))).sum()
+        
+        loss = loss_hard + self.soft_lambda * loss_trans
+        
+        if not torch.isnan(loss) and not torch.isinf(loss): 
+            return loss
         else:
             return None 
         
 
 
-class RnCLoss_rot_mug(nn.Module):
-    def __init__(self, temperature=2, soft_lambda=0.500, label_diff='l1', feature_sim='l2'):
-        super(RnCLoss_rot_mug, self).__init__()
+
+class RnCLoss_rot_mug_mix(nn.Module):
+    def __init__(self, temperature=2, soft_lambda=0.900, label_diff='l1', feature_sim='l2'):
+        super(RnCLoss_rot_mug_mix, self).__init__()
         self.t = temperature
         self.label_diff_fn = LabelDifference_rot(label_diff)
+        self.label_diff_fn_trans = LabelDifference_trans('l1')
+        
         self.feature_sim_fn = FeatureSimilarity(feature_sim)
         self.soft_lambda = soft_lambda
 
-    def forward(self, rot_feat, rot_green, rot_red, sym, complete=False):
+    def forward(self, rot_feat, rot_green, rot_red, trans, sym, complete=False):
         
         rot_green_diff = self.label_diff_fn(rot_green)
         rot_red_diff = self.label_diff_fn(rot_red)
         
         rot_diff = rot_green_diff + rot_red_diff
-        
+        trans_diff = self.label_diff_fn_trans(trans)
         
         sym_ind = (sym[:, 0] == 1).nonzero(as_tuple=True)[0] # all sym mug 
         rot_diff[sym_ind,:] = rot_green_diff[sym_ind,:] # for sym mug, only keep the green_vec difference between sym mug and other non-sym mug
@@ -290,43 +457,62 @@ class RnCLoss_rot_mug(nn.Module):
         rot_exp_logits = rot_exp_logits.masked_select((1 - torch.eye(n).to(rot_logits.device)).bool()).view(n, n - 1)
        
         rot_diff = rot_diff.masked_select((1 - torch.eye(n).to(rot_logits.device)).bool()).view(n, n - 1)
+        trans_diff = trans_diff.masked_select((1 - torch.eye(n).to(rot_logits.device)).bool()).view(n, n - 1)
         
         loss = 0.0
         
         rot_diff_expanded = rot_diff.unsqueeze(2).expand(-1, -1, n-1)
         rot_diff_expanded_columns = rot_diff_expanded.transpose(1, 2)
-        
-        
+        trans_diff_expanded = trans_diff.unsqueeze(2).expand(-1, -1, n-1)
+        trans_diff_expanded_columns = trans_diff_expanded.transpose(1, 2)
+
         rot_result_matrices = (rot_diff_expanded <= rot_diff_expanded_columns)
+        trans_result_matrices = (trans_diff_expanded <= trans_diff_expanded_columns)
+        
+        hard_neg_mask = (rot_result_matrices * trans_result_matrices).float() # rot_diff<=anchor_rot_diff AND trans_diff<=anchor_trans_diff
         
         rot_neg_mask_label =  rot_result_matrices.permute(1,0,2)
+        hard_neg_mask = hard_neg_mask.permute(1,0,2)
         
+        # hard_neg_mask = (rot_result_matrices * trans_result_matrices).float() # rot_diff<=anchor_rot_diff AND trans_diff<=anchor_trans_diff
+        # soft_neg_mask = (rot_result_matrices + trans_result_matrices).float() # rot_diff<=anchor_rot_diff OR trans_diff<=anchor_trans_diff
+        
+        
+        # hard_neg_mask = hard_neg_mask.permute(1,0,2)
+        # soft_neg_mask = soft_neg_mask.permute(1,0,2)
         
         eps = 1e-7
             
         pos_log_probs_rot = rot_logits.permute(1,0) - torch.log((rot_neg_mask_label * rot_exp_logits).sum(dim=-1)+eps)
+        pos_log_probs_hard = rot_logits.permute(1,0) - torch.log((hard_neg_mask * rot_exp_logits).sum(dim=-1)+eps)
         
+        loss_hard = - (pos_log_probs_hard / (n * (n - 1))).sum()
         loss_rot = - (pos_log_probs_rot / (n * (n - 1))).sum()
         
-
-        if not torch.isnan(loss_rot) and not torch.isinf(loss_rot): 
-            return loss_rot
+        loss = loss_hard + self.soft_lambda * loss_rot
+        
+        if not torch.isnan(loss) and not torch.isinf(loss): 
+            return loss
         else:
             return None   
-class RnCLoss_rot_nonSym(nn.Module):
-    def __init__(self, temperature=2, soft_lambda=0.500, label_diff='l1', feature_sim='l2'):
-        super(RnCLoss_rot_nonSym, self).__init__()
+
+
+class RnCLoss_rot_nonSym_mix(nn.Module):
+    def __init__(self, temperature=2, soft_lambda=0.900, label_diff='l1', feature_sim='l2'):
+        super(RnCLoss_rot_nonSym_mix, self).__init__()
         self.t = temperature
         self.label_diff_fn = LabelDifference_rot(label_diff)
+        self.label_diff_fn_trans = LabelDifference_trans('l1')
         self.feature_sim_fn = FeatureSimilarity(feature_sim)
         self.soft_lambda = soft_lambda
 
-    def forward(self, rot_feat, rot_green, rot_red, complete=False):
+    def forward(self, rot_feat, rot_green, rot_red, trans, complete=False):
         
         rot_green_diff = self.label_diff_fn(rot_green)
         rot_red_diff = self.label_diff_fn(rot_red)
         
         rot_diff = rot_green_diff + rot_red_diff
+        trans_diff = self.label_diff_fn_trans(trans)
         
         rot_logits = self.feature_sim_fn(rot_feat).div(self.t)
         rot_logits_max, _ = torch.max(rot_logits, dim=1, keepdim=True)
@@ -340,29 +526,109 @@ class RnCLoss_rot_nonSym(nn.Module):
         rot_exp_logits = rot_exp_logits.masked_select((1 - torch.eye(n).to(rot_logits.device)).bool()).view(n, n - 1)
        
         rot_diff = rot_diff.masked_select((1 - torch.eye(n).to(rot_logits.device)).bool()).view(n, n - 1)
+        trans_diff = trans_diff.masked_select((1 - torch.eye(n).to(rot_logits.device)).bool()).view(n, n - 1)
         
         loss = 0.0
         
         rot_diff_expanded = rot_diff.unsqueeze(2).expand(-1, -1, n-1)
         rot_diff_expanded_columns = rot_diff_expanded.transpose(1, 2)
-        
+        trans_diff_expanded = trans_diff.unsqueeze(2).expand(-1, -1, n-1)
+        trans_diff_expanded_columns = trans_diff_expanded.transpose(1, 2)
+
         
         rot_result_matrices = (rot_diff_expanded <= rot_diff_expanded_columns)
+        trans_result_matrices = (trans_diff_expanded <= trans_diff_expanded_columns)
+        
+        hard_neg_mask = (rot_result_matrices * trans_result_matrices).float() # rot_diff<=anchor_rot_diff AND trans_diff<=anchor_trans_diff
         
         rot_neg_mask_label =  rot_result_matrices.permute(1,0,2)
+        hard_neg_mask = hard_neg_mask.permute(1,0,2)
         
+        # hard_neg_mask = (rot_result_matrices * trans_result_matrices).float() # rot_diff<=anchor_rot_diff AND trans_diff<=anchor_trans_diff
+        # soft_neg_mask = (rot_result_matrices + trans_result_matrices).float() # rot_diff<=anchor_rot_diff OR trans_diff<=anchor_trans_diff
+        
+        
+        # hard_neg_mask = hard_neg_mask.permute(1,0,2)
+        # soft_neg_mask = soft_neg_mask.permute(1,0,2)
         
         eps = 1e-7
             
         pos_log_probs_rot = rot_logits.permute(1,0) - torch.log((rot_neg_mask_label * rot_exp_logits).sum(dim=-1)+eps)
+        pos_log_probs_hard = rot_logits.permute(1,0) - torch.log((hard_neg_mask * rot_exp_logits).sum(dim=-1)+eps)
         
+        loss_hard = - (pos_log_probs_hard / (n * (n - 1))).sum()
         loss_rot = - (pos_log_probs_rot / (n * (n - 1))).sum()
         
+        loss = loss_hard + self.soft_lambda * loss_rot
+        
+        if not torch.isnan(loss) and not torch.isinf(loss): 
+            return loss
+        else:
+            return None      
+class RnCLoss_rot_mix(nn.Module):
+    def __init__(self, temperature=2, soft_lambda=0.900, label_diff='l1', feature_sim='l2'):
+        super(RnCLoss_rot_mix, self).__init__()
+        self.t = temperature
+        self.label_diff_fn = LabelDifference_rot(label_diff)
+        self.label_diff_fn_trans = LabelDifference_trans('l1')
+        self.feature_sim_fn = FeatureSimilarity(feature_sim)
+        self.soft_lambda = soft_lambda
 
-        if not torch.isnan(loss_rot) and not torch.isinf(loss_rot): 
-            return loss_rot
+    def forward(self, rot_feat, rot, trans, complete=False):
+        
+        rot_diff = self.label_diff_fn(rot)
+        trans_diff = self.label_diff_fn_trans(trans)
+        
+        
+        rot_logits = self.feature_sim_fn(rot_feat).div(self.t)
+        rot_logits_max, _ = torch.max(rot_logits, dim=1, keepdim=True)
+        rot_logits -= rot_logits_max
+        rot_exp_logits = rot_logits.exp()
+
+        
+        n = rot_logits.shape[0]  # n = 2bs
+
+        # remove diagonal
+        rot_logits = rot_logits.masked_select((1 - torch.eye(n).to(rot_logits.device)).bool()).view(n, n - 1)
+        rot_exp_logits = rot_exp_logits.masked_select((1 - torch.eye(n).to(rot_logits.device)).bool()).view(n, n - 1)
+       
+        rot_diff = rot_diff.masked_select((1 - torch.eye(n).to(rot_logits.device)).bool()).view(n, n - 1)
+        trans_diff = trans_diff.masked_select((1 - torch.eye(n).to(rot_logits.device)).bool()).view(n, n - 1)
+        
+        loss = 0.0
+        
+        rot_diff_expanded = rot_diff.unsqueeze(2).expand(-1, -1, n-1)
+        rot_diff_expanded_columns = rot_diff_expanded.transpose(1, 2)
+        trans_diff_expanded = trans_diff.unsqueeze(2).expand(-1, -1, n-1)
+        trans_diff_expanded_columns = trans_diff_expanded.transpose(1, 2)
+
+        
+        rot_result_matrices = (rot_diff_expanded <= rot_diff_expanded_columns)
+        trans_result_matrices = (trans_diff_expanded <= trans_diff_expanded_columns)
+        
+        hard_neg_mask = (rot_result_matrices * trans_result_matrices).float() # rot_diff<=anchor_rot_diff AND trans_diff<=anchor_trans_diff
+        
+        rot_neg_mask_label =  rot_result_matrices.permute(1,0,2)
+        hard_neg_mask = hard_neg_mask.permute(1,0,2)
+        
+        # hard_neg_mask = (rot_result_matrices * trans_result_matrices).float() # rot_diff<=anchor_rot_diff AND trans_diff<=anchor_trans_diff
+        # soft_neg_mask = (rot_result_matrices + trans_result_matrices).float() # rot_diff<=anchor_rot_diff OR trans_diff<=anchor_trans_diff
+        
+        
+        # hard_neg_mask = hard_neg_mask.permute(1,0,2)
+        # soft_neg_mask = soft_neg_mask.permute(1,0,2)
+        
+        eps = 1e-7
+            
+        pos_log_probs_rot = rot_logits.permute(1,0) - torch.log((rot_neg_mask_label * rot_exp_logits).sum(dim=-1)+eps)
+        pos_log_probs_hard = rot_logits.permute(1,0) - torch.log((hard_neg_mask * rot_exp_logits).sum(dim=-1)+eps)
+        
+        loss_hard = - (pos_log_probs_hard / (n * (n - 1))).sum()
+        loss_rot = - (pos_log_probs_rot / (n * (n - 1))).sum()
+        
+        loss = loss_hard + self.soft_lambda * loss_rot
+
+        if not torch.isnan(loss) and not torch.isinf(loss): 
+            return loss
         else:
             return None  
-        
-
-

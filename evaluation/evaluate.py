@@ -15,7 +15,7 @@ import time
 
 # from creating log
 import tensorflow as tf
-from evaluation.eval_utils import setup_logger
+from evaluation.eval_utils_v1 import setup_logger
 from evaluation.eval_utils_v1 import compute_degree_cm_mAP
 from tqdm import tqdm
 
@@ -82,7 +82,8 @@ def evaluate(argv):
         for param in clip_model_rot.parameters():
             param.requires_grad = False   
         ################ Finish Loading CLIP Models #########################  
-
+        
+        #################### Loading Pose Estimator ############################
         if FLAGS.resume:
             state_dict = torch.load(FLAGS.resume_model)['posenet_state_dict']
             unnecessary_nets = ['posenet.face_recon.conv1d_block', 'posenet.face_recon.face_head', 'posenet.face_recon.recon_head']
@@ -98,6 +99,7 @@ def evaluate(argv):
             network.load_state_dict(state_dict, strict=True) 
         else:
             raise NotImplementedError
+        
         # start to test
         network = network.eval()
         clip_model_rot = clip_model_rot.eval()

@@ -215,12 +215,12 @@ class PoseDataset(data.Dataset):
                     continue
                 else:
                     obj_valid_index.append(j)
-
+            
             coord_2d = get_2d_coord_np(im_W, im_H).transpose(1, 2, 0)
             # aggragate information about the selected object
-            mask = detection_dict['pred_masks'][:, :, j]
-            bbox = detection_dict['pred_bboxes'][j]
-            rmin, rmax, cmin, cmax = get_bbox(bbox)
+            mask = detection_dict['pred_masks'][:, :, j] # H*W
+            bbox = detection_dict['pred_bboxes'][j] # 4*1
+            rmin, rmax, cmin, cmax = get_bbox(bbox) 
             # here resize and crop to a fixed size 256 x 256
             bbox_xyxy = np.array([cmin, rmin, cmax, rmax])
             x1, y1, x2, y2 = bbox_xyxy
@@ -254,6 +254,7 @@ class PoseDataset(data.Dataset):
             roi_m_d_valid = roi_mask.astype(np.bool) * depth_valid
             if np.sum(roi_m_d_valid) <= 1.0:
                 return None
+            import pdb;pdb.set_trace()
             pcl_in = self._depth_to_pcl(roi_depth, out_camK, roi_coord_2d, roi_mask) / 1000.0
             pcl_in = self._sample_points(pcl_in, FLAGS.random_points)
 

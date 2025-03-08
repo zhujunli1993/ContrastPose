@@ -4,10 +4,9 @@ import torch.nn.functional as F
 import pytorch3d
 import sys
 sys.path.append('..')
-from .rnc_loss import RnCLoss_rot_sym, RnCLoss_rot_nonSym,  RnCLoss_rot_mug
-from configs.config import get_config 
-from networks.pts_encoder.pointnet2 import Pointnet2ClsMSG
-from gpv_tools.training_utils import get_gt_v
+from .rnc_loss import RnCLoss_rot_mug_mix, RnCLoss_rot_nonSym_mix,  RnCLoss_rot_mug_mix
+from config.config_contrast import get_config 
+from tools.training_utils import get_gt_v
 from .Rot_3DGC import Pts_3DGC
 CFG = get_config()
 def unique(x, dim=None):
@@ -140,13 +139,13 @@ class Class_Rank(nn.Module):
             self.layer_penalty = layer_penalty
         # self.sup_con_loss = SupConLoss(temperature=self.temperature, contrast_mode='all', base_temperature=self.temperature, feature_sim='l2')
         self.loss_type = loss_type
-        self.rnc_loss_nonSym = RnCLoss_rot_nonSym(temperature=self.temperature, label_diff='cos', feature_sim='l2')
-        self.rnc_loss = RnCLoss_rot_sym(temperature=self.temperature, label_diff='cos', feature_sim='l2')
-        self.rnc_loss_mug = RnCLoss_rot_mug(temperature=self.temperature, label_diff='cos', feature_sim='l2')
+        self.rnc_loss_nonSym = RnCLoss_rot_nonSym_mix(temperature=self.temperature,soft_lambda=0.800, label_diff='cos', feature_sim='l2')
+        self.rnc_loss = RnCLoss_rot_mix(temperature=self.temperature, soft_lambda=0.800,label_diff='cos', feature_sim='l2')
+        self.rnc_loss_mug = RnCLoss_rot_mug_mix(temperature=self.temperature, soft_lambda=0.800, label_diff='cos', feature_sim='l2')
     def pow_2(self, value):
         return torch.pow(2, value)
 
-    def forward(self, features, labels, gt_green, gt_red, sym):
+    def forward(self, features, labels, gt_green, gt_red, gt_trans, sym):
         device = features.device
         bs = labels.shape[0]
 
@@ -158,16 +157,20 @@ class Class_Rank(nn.Module):
             ind = torch.where(labels == i)[0]
 
             sym_ind = (sym[ind, 0] == 0).nonzero(as_tuple=True)[0] # find non-sym objects
-            feat_id, green_id, red_id = features[ind], gt_green[ind], gt_red[ind]
+            feat_id, green_id, red_id, gt_trans_id = features[ind], gt_green[ind], gt_red[ind], gt_trans[ind]
+            
             if i == 5:
-                rot_layer_loss += self.rnc_loss_mug(feat_id, green_id, red_id, sym[ind])
+                rot_layer_loss += self.rnc_loss_mug(feat_id, green_id, red_id, gt_trans_id, sym[ind])
+                
             else:
                 if len(sym_ind) == 0: # sym obj
-                    rot_layer_loss += self.rnc_loss(feat_id, green_id)
+                    rot_layer_loss += self.rnc_loss(feat_id, green_id, gt_trans_id)
+                    
                 else:
-                    rot_layer_loss += self.rnc_loss_nonSym(feat_id, green_id, red_id)
-
+                    rot_layer_loss += self.rnc_loss_nonSym(feat_id, green_id, red_id, gt_trans_id)
+                    
         return rot_layer_loss / len(all_ids)
+
 
 
 

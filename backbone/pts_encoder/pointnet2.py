@@ -4,10 +4,10 @@ import sys
 import os
 
 sys.path.append(os.path.dirname(os.path.dirname(__file__)))
-from networks.pts_encoder.pointnet2_utils.pointnet2.pointnet2_modules import PointnetFPModule, PointnetSAModuleMSG
-import networks.pts_encoder.pointnet2_utils.pointnet2.pytorch_utils as pt_utils
+from backbone.pts_encoder.pointnet2_utils.pointnet2.pointnet2_modules import PointnetFPModule, PointnetSAModuleMSG
+import backbone.pts_encoder.pointnet2_utils.pointnet2.pytorch_utils as pt_utils
 from ipdb import set_trace
-from configs.config import get_config
+from config.config_contrast import get_config 
 
 
 cfg = get_config()

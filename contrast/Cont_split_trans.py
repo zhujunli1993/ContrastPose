@@ -4,9 +4,9 @@ import torch.nn.functional as F
 import pytorch3d
 import sys
 sys.path.append('..')
-from .rnc_loss import RnCLoss_trans
-from configs.config import get_config 
-from backbone.pts_encoder.pointnet2 import Pointnet2ClsMSG
+from .rnc_loss import RnCLoss_trans_mix,RnCLoss_trans_mug_mix,RnCLoss_trans_nonSym_mix
+from config.config_contrast import get_config  
+from .Rot_3DGC import Pts_3DGC
 
 CFG = get_config()
 
@@ -28,8 +28,6 @@ class Projection(nn.Module):
         
         return self.bn2(self.w2(self.relu(self.bn1(self.w1(embedding)))))
         
-  
-        
 class Model_Trans_all(nn.Module):
     def __init__(
         self,
@@ -42,42 +40,61 @@ class Model_Trans_all(nn.Module):
         super(Model_Trans_all, self).__init__()
         ''' encode point clouds '''
         
-        self.pts_encoder = Pointnet2ClsMSG(0)
+        self.pts_encoder = Pts_3DGC()
 
-        self.project_head = Projection(1024)
+        self.project_head = Projection(1283)
         self.temperature = temperature
+        
         self.clrk = Class_Rank(temperature=self.temperature,base_temperature=self.temperature)
     
     
        
     def forward(self, batch, umap=False, for_test=False, for_decoder=False):
+
         
         bs = batch['pts'].shape[0]
-        pts_features = self.project_head(self.pts_encoder(batch['pts'])) #bs*N*3
+        mean_point = batch['pts'].mean(dim=1, keepdim=True) 
+        _, pts_1_features_pp = self.pts_encoder(batch['pts']-mean_point)
+        pts_1_features_pp = torch.cat([pts_1_features_pp, batch['pts']-mean_point], dim=2)
+        
+        pts_1_features = pts_1_features_pp.max(1)[0] # (bs, 1283)
+
+        pts_1_features = self.project_head(pts_1_features) #bs*N*3
         
         
-        if torch.all(torch.isnan(pts_features))==False and torch.all(torch.isinf(pts_features))==False:
+        if torch.all(torch.isnan(pts_1_features))==False and torch.all(torch.isinf(pts_1_features))==False:
             if not for_decoder and not umap:
                 # Getting point cloud and gt pose Features
-                gt_pose = batch['gt_pose'][:, 9:]
+                gt_pose = batch['zero_mean_gt_pose']
+                gt_R = gt_pose[:, :9].reshape(bs,3,3)
+                gt_green, gt_red = get_gt_v(gt_R)
+                sym = batch['sym']
+                gt_t = batch['gt_pose'][:, 9:] - batch['pts'].mean(dim=1)
                 labels = batch['id']
-                trans_loss = self.clrk(pts_features, labels, gt_pose)
+                trans_loss = self.clrk(pts_1_features, labels, gt_green, gt_red, gt_t, sym)
                 
-                return trans_loss
+                return trans_loss, pts_1_features_pp.permute(0,2,1)
             
             
             if for_decoder and not umap:
-                return pts_features
+                return pts_1_features_pp.permute(0,2,1)
             
             if umap:
                 # Getting point cloud and gt pose Features
-                gt_pose = batch['gt_pose'][:, 9:]
+                gt_pose = batch['zero_mean_gt_pose']
+                gt_R = gt_pose[:, :9].reshape(bs,3,3)
+                gt_green, gt_red = get_gt_v(gt_R)
+                sym = batch['sym']
+                gt_t = batch['gt_pose'][:, 9:]  - batch['pts'].mean(dim=1)
                 labels = batch['id']
-                trans_loss = self.clrk(pts_features, labels, gt_pose)
-                return trans_loss, pts_features, gt_pose
+                trans_loss = self.clrk(pts_1_features, labels, gt_green, gt_red, gt_t, sym)
+                return trans_loss, pts_1_features, gt_t
         else:
             import pdb;pdb.set_trace()
             return None                
+        
+        
+   
                 
 class Class_Rank(nn.Module):
     def __init__(self, temperature=2,
@@ -91,28 +108,36 @@ class Class_Rank(nn.Module):
             self.layer_penalty = layer_penalty
         # self.sup_con_loss = SupConLoss(temperature=self.temperature, contrast_mode='all', base_temperature=self.temperature, feature_sim='l2')
         self.loss_type = loss_type
-        self.rnc_loss = RnCLoss_trans(temperature=self.temperature, label_diff='l1', feature_sim='l2')
         
-        
+        self.rnc_loss_nonSym = RnCLoss_trans_nonSym_mix(temperature=self.temperature,soft_lambda=0.800, label_diff='l1', feature_sim='l2')
+        self.rnc_loss = RnCLoss_trans_mix(temperature=self.temperature, soft_lambda=0.800,label_diff='l1', feature_sim='l2')
+        self.rnc_loss_mug = RnCLoss_trans_mug_mix(temperature=self.temperature, soft_lambda=0.800, label_diff='l1', feature_sim='l2')
+    
     def pow_2(self, value):
         return torch.pow(2, value)
 
-    def forward(self, features, labels, gt_T):
+    def forward(self, features, labels, gt_green, gt_red, gt_trans, sym):
         device = features.device
         bs = labels.shape[0]
-        
-        t_layer_loss = torch.tensor(0.0).to(device)
+
+        trans_layer_loss = torch.tensor(0.0).to(device)
         all_ids = torch.unique(labels)
         
         for i in all_ids:
             
             ind = torch.where(labels == i)[0]
 
-            feat_id, t_id= features[ind], gt_T[ind]
-            t_layer_loss += self.rnc_loss(feat_id, t_id)
+            sym_ind = (sym[ind, 0] == 0).nonzero(as_tuple=True)[0] # find non-sym objects
+            feat_id, green_id, red_id, gt_trans_id = features[ind], gt_green[ind], gt_red[ind], gt_trans[ind]
             
-
-        return t_layer_loss / len(all_ids)
-
-
-
+            if i == 5:
+                trans_layer_loss += self.rnc_loss_mug(feat_id, green_id, red_id, gt_trans_id, sym[ind])
+                
+            else:
+                if len(sym_ind) == 0: # sym obj
+                    trans_layer_loss += self.rnc_loss(feat_id, green_id, gt_trans_id)
+                    
+                else:
+                    trans_layer_loss += self.rnc_loss_nonSym(feat_id, green_id, red_id, gt_trans_id)
+                    
+        return trans_layer_loss / len(all_ids)

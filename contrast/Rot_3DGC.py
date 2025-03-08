@@ -6,7 +6,7 @@ import torch.nn.functional as F
 from absl import app
 import sys
 sys.path.append('..')
-from configs.config import get_config 
+from config.config_contrast import get_config 
 
 FLAGS = get_config()
 
@@ -55,9 +55,16 @@ class Pts_3DGC(nn.Module):
         v_pool_2, fm_pool_2 = self.pool_2(v_pool_1, fm_3)
         fm_4 = self.conv_4(v_pool_2, fm_pool_2, min(self.neighbor_num, v_pool_2.shape[1] // 8))
         f_global = fm_4.max(1)[0]  # (bs, f)
-
         
-        return f_global
-
+        nearest_pool_1 = gcn3d_hs.get_nearest_index(vertices, v_pool_1)
+        nearest_pool_2 = gcn3d_hs.get_nearest_index(vertices, v_pool_2)
+        fm_2 = gcn3d_hs.indexing_neighbor_new(fm_2, nearest_pool_1).squeeze(2)
+        fm_3 = gcn3d_hs.indexing_neighbor_new(fm_3, nearest_pool_1).squeeze(2)
+        fm_4 = gcn3d_hs.indexing_neighbor_new(fm_4, nearest_pool_2).squeeze(2)
+        #one_hot = one_hot.unsqueeze(1).repeat(1, vertice_num, 1)  # (bs, vertice_num, cat_one_hot)
+        
+        feat = torch.cat([fm_0, fm_1, fm_2, fm_3, fm_4], dim=2) # bs*1024*1280
+        
+        return f_global, feat
 
 

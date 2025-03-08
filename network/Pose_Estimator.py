@@ -35,11 +35,11 @@ class Pose_Estimator(nn.Module):
         self.name_fs_list, self.name_recon_list, \
             self.name_geo_list, self.name_prop_list = control_loss(self.train_stage)
 
-    def forward(self, clip_r_func, clip_t_func, PC=None, depth=None, obj_id=None, camK=None,
+    def forward(self,  PC=None, depth=None, obj_id=None, camK=None,
                 gt_R=None, gt_t=None, gt_s=None, mean_shape=None, gt_2D=None, sym=None, aug_bb=None,
                 aug_rt_t=None, aug_rt_r=None, def_mask=None, model_point=None, nocs_scale=None, do_loss=False):
         output_dict = {}
-
+        
         if PC is None:
             if self.train_stage == 'PoseNet_only':
                 FLAGS.sample_method = 'basic'
@@ -66,13 +66,14 @@ class Pose_Estimator(nn.Module):
                 gt_s = gt_s_da
                 batch = {}
                 batch['zero_mean_pts_1'], batch['pts']= PC - PC.mean(dim=1, keepdim=True), PC
-                clip_r_feat, clip_t_feat = clip_r_func(batch,for_decoder=True, umap=False), clip_t_func(batch,for_decoder=True,umap=False)
+                batch['zero_mean_gt_pose'], batch['id'], batch['sym'] = gt_R_da, obj_id, sym
+                batch['gt_pose'] = gt_t_da
         else:
             with torch.no_grad():
                 batch = {}
                 
                 batch['zero_mean_pts_1'], batch['pts']= PC - PC.mean(dim=1, keepdim=True), PC
-                clip_r_feat, clip_t_feat = clip_r_func(batch,for_decoder=True, umap=False), clip_t_func(batch,for_decoder=True,umap=False)
+                
         if FLAGS.use_clip==1.0:
             use_clip = True  
         else:
@@ -90,12 +91,12 @@ class Pose_Estimator(nn.Module):
         else:
             use_clip_atte = False
         if FLAGS.save_info == 1.0:
-            recon, face_normal, face_dis, face_f, p_green_R, p_red_R, f_green_R, f_red_R, \
-            Pred_T, Pred_s, feat = self.posenet(PC, obj_id, clip_r_feat, clip_t_feat, use_clip=use_clip, use_clip_global=use_clip_global, 
+            clip_loss_r, clip_loss_t, recon, face_normal, face_dis, face_f, p_green_R, p_red_R, f_green_R, f_red_R, \
+            Pred_T, Pred_s, feat = self.posenet(PC, obj_id, use_clip=use_clip, use_clip_global=use_clip_global, 
                                       use_clip_nonLinear=use_clip_nonLinear,use_clip_atte=use_clip_atte)
         else:
-            recon, face_normal, face_dis, face_f, p_green_R, p_red_R, f_green_R, f_red_R, \
-            Pred_T, Pred_s = self.posenet(PC, obj_id, clip_r_feat, clip_t_feat, use_clip=use_clip, use_clip_global=use_clip_global, 
+            clip_loss_r, clip_loss_t, recon, face_normal, face_dis, face_f, p_green_R, p_red_R, f_green_R, f_red_R, \
+            Pred_T, Pred_s = self.posenet(PC, obj_id,  use_clip=use_clip, use_clip_global=use_clip_global, 
                                         use_clip_nonLinear=use_clip_nonLinear,use_clip_atte=use_clip_atte)
 
         output_dict['mask'] = obj_mask
@@ -210,6 +211,9 @@ class Pose_Estimator(nn.Module):
             geo_loss = self.loss_geo(self.name_geo_list, pred_geo_list, gt_geo_list, sym)
 
             loss_dict = {}
+            if FLAGS.train:
+                loss_dict['clip_r_loss'] = clip_loss_r
+                loss_dict['clip_t_loss'] = clip_loss_t
             loss_dict['fsnet_loss'] = fsnet_loss
             loss_dict['recon_loss'] = recon_loss
             loss_dict['geo_loss'] = geo_loss

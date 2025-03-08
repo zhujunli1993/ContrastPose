@@ -20,9 +20,6 @@ import tensorflow as tf
 from tools.eval_utils import setup_logger
 from tensorflow.compat.v1 import Summary
 
-from contrast.Cont_split_trans import Model_Trans_all as Model_trans
-from contrast.Cont_split_rot import Model_Rot_all as Model_rot
-
 
 torch.autograd.set_detect_anomaly(True)
 device = 'cuda'
@@ -52,27 +49,7 @@ def train(argv):
     network = network.to(device)
     train_steps = FLAGS.train_steps 
     
-    ################ Load CLIP Models #########################
-    ''' Load pretrained CLIP trianing agent'''
-    clip_model_rot = Model_rot().to(FLAGS.device)
-    if FLAGS.pretrained_clip_rot_model_path:
-        clip_model_rot.load_state_dict(torch.load(FLAGS.pretrained_clip_rot_model_path))
-    else:
-        print("No Pretrained Rotation CLIP Model !!!")
-        sys.exit()
-        
-    clip_model_t = Model_trans().to(FLAGS.device)
-    if FLAGS.pretrained_clip_t_model_path:
-        clip_model_t.load_state_dict(torch.load(FLAGS.pretrained_clip_t_model_path))
-    else:
-        print("No Pretrained Translation CLIP Model !!!")
-        sys.exit()
-    # Freeze clip model parameters
-    for param in clip_model_t.parameters():
-        param.requires_grad = False     
-    for param in clip_model_rot.parameters():
-        param.requires_grad = False   
-     ################ Finish Loading CLIP Models #########################      
+    
      
     #  build optimizer
     param_list = network.build_params(training_stage_freeze=[])
@@ -105,8 +82,7 @@ def train(argv):
         for data in tqdm(train_dataloader, desc=f'Training {epoch}/{FLAGS.total_epoch}', dynamic_ncols=True):
             output_dict, loss_dict \
                 = network(
-                          clip_r_func=clip_model_rot.to(device),
-                          clip_t_func=clip_model_t.to(device),
+                          
                           obj_id=data['cat_id'].to(device), 
                           PC=data['pcl_in'].to(device), 
                           gt_R=data['rotation'].to(device), 
@@ -125,9 +101,11 @@ def train(argv):
             recon_loss = loss_dict['recon_loss']
             geo_loss = loss_dict['geo_loss']
             prop_loss = loss_dict['prop_loss']
-
+            clip_r_loss = loss_dict['clip_r_loss']
+            clip_t_loss = loss_dict['clip_t_loss']
             total_loss = sum(fsnet_loss.values()) + sum(recon_loss.values()) \
                             + sum(geo_loss.values()) + sum(prop_loss.values()) \
+                            + clip_r_loss + clip_t_loss
 
             if math.isnan(total_loss):
                 print('Found nan in total loss')
@@ -162,10 +140,12 @@ def train(argv):
                 '{0}/model_{1:02d}.pth'.format(FLAGS.model_save, epoch))
         torch.cuda.empty_cache()
 
-def write_to_summary(writter, optimizer, total_loss, fsnet_loss, prop_loss, recon_loss, global_step):
+def write_to_summary(writter, optimizer, total_loss, clip_r_loss, clip_t_loss, fsnet_loss, prop_loss, recon_loss, global_step):
     wandb.log({
                 "lr": optimizer.param_groups[0]["lr"],
                 "train_loss":total_loss,
+                "clip_loss_r":clip_r_loss,
+                "clip_loss_t":clip_t_loss,
                 "rot_loss_1":fsnet_loss['Rot1'],
                 "rot_loss_2":fsnet_loss['Rot2'],
                 "T_loss":fsnet_loss['Tran'],
