@@ -1,4 +1,4 @@
-# Contrastive Pose
+# HRC-Pose
 Pytorch implementation of HRC-Pose: Learning Point Cloud Representations with Pose Continuity for Category-Level 6D Object Pose Estimation.
 
 ## Table of Contents  
